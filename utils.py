@@ -7,6 +7,8 @@ from torchcrf import CRF as CRFDecoder
 from tqdm import tqdm
 from wasabi import msg
 
+from spacy.training import offsets_to_biluo_tags
+
 from data_preparation import get_sentence_docs
 from postprocessing_utils import postprocessing
 
@@ -19,116 +21,185 @@ UNK_SYMBOL = "<UNK>"
 # For padding our variable length batches
 PAD_SYMBOL = "<PAD>"
 
-def json_to_dataframe(data):
-    id = []
-    text = []
-    start = []
-    end = []
-    entity = []
-    label = []
+# def json_to_dataframe(data):
+#     id = []
+#     text = []
+#     start = []
+#     end = []
+#     entity = []
+#     label = []
 
-    all_labels = set()
+#     all_labels = set()
 
-    for d in data:
-        id_text = d['id']
-        data = d['data']
-        for x in d['annotations']:
-            info = x['result']
-            for i in info:
-                i_dict = i['value']
-                id.append(id_text)
-                text.append(data['text'])
-                start.append(i_dict['start'])
-                end.append(i_dict['end'])
-                entity.append(i_dict['text'])
-                label.append(i_dict['labels'][0])
-                all_labels.add(i_dict['labels'][0])
+#     for d in data:
+#         id_text = d['id']
+#         data = d['data']
+#         for x in d['annotations']:
+#             info = x['result']
+#             for i in info:
+#                 i_dict = i['value']
+#                 id.append(id_text)
+#                 text.append(data['text'])
+#                 start.append(i_dict['start'])
+#                 end.append(i_dict['end'])
+#                 entity.append(i_dict['text'])
+#                 label.append(i_dict['labels'][0])
+#                 all_labels.add(i_dict['labels'][0])
             
-    df_train = pd.DataFrame(list(zip(id,text,start,end,entity,label)), columns=['id','text','start','end','entity','label'])
-    return (df_train, list(all_labels))
+#     df_train = pd.DataFrame(list(zip(id,text,start,end,entity,label)), columns=['id','text','start','end','entity','label'])
+#     return (df_train, list(all_labels))
 
 
-def get_spacy_texts_from_json(data, nlp_preamble_splitting):
-    ids = []
-    texts = []
+# def get_spacy_texts_from_json(data, nlp_preamble_splitting):
+#     ids = []
+#     texts = []
 
-    for d in data:
-        ids.append(d['id'])
-        text = d['data']['text']
-        texts.append(nlp_preamble_splitting(text))
+#     for d in data:
+#         ids.append(d['id'])
+#         text = d['data']['text']
+#         texts.append(nlp_preamble_splitting(text))
     
-    df_texts = pd.DataFrame(list(zip(ids,texts)), columns=['id','text'])
+#     df_texts = pd.DataFrame(list(zip(ids,texts)), columns=['id','text'])
 
-    return df_texts
+#     return df_texts
 
 
-def predict_baseline(texts, model, text_type, do_postprocess):
+def predict_baseline(json_data, model, nlp_preamble_splitting, text_type, do_postprocess):
     # returns the prediction of all entities in each text
-    out = []
+    result = []
 
-    for text in texts:
+    for data in json_data:
+        doc = nlp_preamble_splitting(data['text'])
+
         if text_type=='doc':
-            predicted_text=model(text)
+            predicted=model(doc)
         else:
-            predicted_text=get_sentence_docs(text,model)
+            predicted=get_sentence_docs(doc, model)
         
         try:
             if do_postprocess:
-                predicted_text=postprocessing(predicted_text)
+                predicted=postprocessing(predicted)
         except:
             msg.warn('There was some issue while performing postprocessing, skipping postprocessing...')
+
+        predicted_json = predicted.to_json()
         
-        out.append(predicted_text)
+        result.append({
+            'text': predicted_json['text'],
+            'ents': predicted_json['ents']
+        })
 
-    return out
+    return result
 
 
-def load_data(
-    filepath: str,
+def prepare_data_from_raw_json(json_data):
+    result = []
+
+    for data in json_data:
+        out = {}
+        offset_entities_list = []
+
+        for annot in data['annotations']:
+            entities = annot['result']
+            for entity in entities:
+                offset_entities_list.append({
+                    'start': entity['value']['start'],
+                    'end': entity['value']['end'],
+                    'label': entity['value']['labels'][0]
+                })
+        
+        out['text'] = data['data']['text']
+        out['ents'] = offset_entities_list
+        result.append(out)
+    
+    return result
+
+
+def get_iob_tags(text, results_data):
+    def get_offset_list_from_json_data(results_data):
+        entities = []
+
+        for entity in results_data:
+            entities.append((entity['start'], entity['end'], entity['label']))
+        return entities
+
+    entity_offset_list = get_offset_list_from_json_data(results_data)
+    biluo_tags = offsets_to_biluo_tags(text, entity_offset_list, missing="O")
+
+    def convert_biluo_to_iob(tags):
+        iob_tags = []
+        is_misaligned = False
+        for tag in tags:
+            if tag == '-':
+                is_misaligned = True
+            
+            tag_split = tag.split("-")
+
+            if tag_split[0] == 'L':
+                tag = "I-" + tag_split[1]
+            elif tag_split[0] == 'U':
+                tag = "B-" + tag_split[1]
+            
+            iob_tags.append(tag)
+        if is_misaligned:
+            print(text, entity_offset_list, tags)
+        return iob_tags
+
+    return convert_biluo_to_iob(biluo_tags)
+
+
+def load_processed_json_data(
+    json_data,
+    nlp_preamble_splitting
 ) -> Tuple[List[str], List[str]]:
     """Load the training data, producing a List of sentences, each comprising
     a List of tokens, and a List of their corresponding NER tags
 
     Args:
-        filepath (str): Path to the training file
+        json_data: JSON data
+        nlp_preamble_splitting: spacy Model
 
     Returns:
        Tuple[List[str], List[str]]: The tokens and tags
     """
     token_sents = []
     tag_sents = []
-    token_sent = []
-    tag_sent = []
-    with open(filepath, "r") as f:
-        for line in f:
-            # Newline indicates a new sentence.
-            if not line.rstrip():
-                token_sents.append(token_sent)
-                token_sent = []
-                tag_sents.append(tag_sent)
-                tag_sent = []
-            else:
-                token, tag = line.rstrip().split("\t")
-                token_sent.append(token)
-                tag_sent.append(tag)
+
+    for json in json_data:
+        # Append list of tokens in text
+        text = json['text']
+        text = nlp_preamble_splitting(text)
+        token_sents.append([word.text for word in text])
+        
+        # Create IOB Tagging
+        tag_sents.append(get_iob_tags(text, json['ents']))
 
     return token_sents, tag_sents
 
 
-def make_labels2i(labels_filepath: str):
+def get_all_labels(training_tag_data: List[List[str]]):
+    all_labels = set()
+
+    for data in training_tag_data: 
+        all_labels.update(data)
+    
+    all_labels = sorted(list(all_labels))
+    
+    return all_labels
+
+
+def make_labels2i(all_labels: List[str]):
     # Initialize labels2i with the PAD_SYMBOL.
     labels2i = {PAD_SYMBOL: 0}
     i = 1
-    with open(labels_filepath, "r") as f:
-        for line in f:
-            if line.rstrip():
-                labels2i[line.rstrip()] = i
-                i += 1
 
+    for label in all_labels:
+        labels2i[label] = i
+        i += 1
     
     return labels2i
 
-    
+
 class NERTagger(torch.nn.Module):
     """NER tagger in pytorch, 
     relying on (pytorch-crf)[https://pytorch-crf.readthedocs.io/en/stable/]
