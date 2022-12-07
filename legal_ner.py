@@ -26,8 +26,9 @@ def extract_entities_from_judgment_text(txt,legal_nlp,nlp_preamble_splitting,tex
     else:
         doc_judgment=get_sentence_docs(judgment_doc,legal_nlp)
 
-    print("Creating doc for jdgement  took " + str(time.time() - judgement_start_time))
-    print(len(doc_judgment.ents))
+    # print("Creating doc for jdgement  took " + str(time.time() - judgement_start_time))
+    
+    # print(len(doc_judgment.ents))
 
     ######### process preamable
     preamble_start_time = time.time()
@@ -36,7 +37,10 @@ def extract_entities_from_judgment_text(txt,legal_nlp,nlp_preamble_splitting,tex
 
     ######### Combine preamble doc & judgement doc
     combining_start_time = time.time()
-    combined_doc = spacy.tokens.Doc.from_docs([doc_preamble, doc_judgment])
+    if doc_preamble and doc_judgment:
+      combined_doc = spacy.tokens.Doc.from_docs([doc_preamble, doc_judgment])
+    else:
+      combined_doc = spacy.tokens.Doc.from_docs([legal_nlp("nonetype"), legal_nlp("nonetype")])
     print("Combining took " + str(time.time() - combining_start_time))
 
     try:
